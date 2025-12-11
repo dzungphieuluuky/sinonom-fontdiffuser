@@ -250,3 +250,34 @@ if __name__=="__main__":
     # load fontdiffuser pipeline
     pipe = load_fontdiffuer_pipeline(args=args)
     out_image = sampling(args=args, pipe=pipe)
+
+"""Sample With Character
+python sample.py \
+    --ckpt_dir="ckpt/" \
+    --style_image_path="data_examples/sampling/example_style.jpg" \
+    --save_image \
+    --character_input \
+    --content_character="隆" \
+    --save_image_dir="outputs/" \
+    --device="cuda:0" \
+    --algorithm_type="dpmsolver++" \
+    --guidance_type="classifier-free" \
+    --guidance_scale=7.5 \
+    --num_inference_steps=20 \
+    --method="multistep"
+"""
+
+"""Sample With Content Image
+python sample.py \
+    --ckpt_dir="ckpt/" \
+    --content_image_path="data_examples/sampling/example_content.jpg" \
+    --style_image_path="data_examples/sampling/example_style.jpg" \
+    --save_image \
+    --save_image_dir="outputs/" \
+    --device="cuda:0" \
+    --algorithm_type="dpmsolver++" \
+    --guidance_type="classifier-free" \
+    --guidance_scale=7.5 \
+    --num_inference_steps=20 \
+    --method="multistep"
+"""

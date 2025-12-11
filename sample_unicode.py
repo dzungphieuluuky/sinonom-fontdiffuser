@@ -302,3 +302,14 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""Example
+python your_script.py \
+    --ckpt_dir ./checkpoints \
+    --style_image_path ./style/A.png \
+    --content_characters "A,B,C,D,E,F,G" \
+    --save_image \
+    --save_image_dir ./outputs/batch_generation \
+    --character_input \
+    --ttf_path ./fonts/default.ttf
+"""
