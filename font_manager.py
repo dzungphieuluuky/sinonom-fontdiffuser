@@ -1,7 +1,8 @@
 """
-Font Manager with Robust Rendering and Unicode Support Checking
-Font Renderer with Fixed ttf2im Implementation
+FontDiffuser Batch Processing with Line Range Specification
+Adds --start_line and --end_line arguments for selective processing
 """
+
 import os
 import sys
 import json

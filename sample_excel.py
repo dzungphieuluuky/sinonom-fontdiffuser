@@ -252,9 +252,363 @@ class FontDiffuserBatchProcessor:
             print(f"    Error generating character '{char}': {e}")
             self.stats['generation_errors'] += 1
             return None, None
+    
+    def process_excel_file(self,
+                          excel_path: str,
+                          base_output_dir: str,
+                          style_image_path: str = None,
+                          generate_input_char: bool = True,
+                          start_line: Optional[int] = None,
+                          end_line: Optional[int] = None) -> Dict:
+        """
+        Process Excel file and generate fonts for similar characters
+        
+        Args:
+            excel_path: Path to Excel file
+            base_output_dir: Base directory for outputs
+            style_image_path: Path to style image
+            generate_input_char: Whether to generate the input character itself
+            start_line: Starting row number (1-indexed, inclusive)
+            end_line: Ending row number (1-indexed, inclusive)
+            
+        Returns:
+            Dictionary with processing results and statistics
+        """
+        # Use provided style image or default from args
+        if style_image_path is None:
+            style_image_path = self.args.style_image_path
+        
+        # Create base output directory
+        Path(base_output_dir).mkdir(parents=True, exist_ok=True)
+        
+        # Save font statistics
+        font_stats = self.font_manager.get_font_statistics()
+        with open(Path(base_output_dir) / "font_statistics.json", 'w', encoding='utf-8') as f:
+            json.dump(font_stats, f, indent=2, ensure_ascii=False)
+        
+        print(f"\n{'='*70}")
+        print(f"FONT STATISTICS")
+        print(f"{'='*70}")
+        print(f"Loaded {font_stats['total_fonts']} fonts:")
+        for font_name, stats in font_stats['total_glyphs_by_font'].items():
+            print(f"  • {font_name}: {stats} glyphs")
+        print(f"{'='*70}\n")
+        
+        # Load Excel file
+        print(f"Loading Excel file: {excel_path}")
+        try:
+            df = pd.read_excel(excel_path)
+            total_rows = len(df)
+            print(f"Excel file loaded with {total_rows} total rows")
+        except Exception as e:
+            raise ValueError(f"Failed to load Excel file: {e}")
+        
+        # Check required columns
+        required_columns = ['Input Character', 'Top 20 Similar Characters']
+        for col in required_columns:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+        
+        # Apply line range filters
+        if start_line is not None or end_line is not None:
+            # Convert to 0-indexed for pandas
+            start_idx = (start_line - 1) if start_line else 0
+            end_idx = (end_line - 1) if end_line else (total_rows - 1)
+            
+            # Validate range
+            if start_idx < 0:
+                print(f"Warning: start_line {start_line} is less than 1, using 1")
+                start_idx = 0
+            
+            if end_idx >= total_rows:
+                print(f"Warning: end_line {end_line} exceeds total rows {total_rows}, using {total_rows}")
+                end_idx = total_rows - 1
+            
+            if start_idx > end_idx:
+                print(f"Warning: start_line ({start_line}) > end_line ({end_line}), swapping")
+                start_idx, end_idx = end_idx, start_idx
+            
+            # Slice the dataframe
+            df = df.iloc[start_idx:end_idx + 1]
+            print(f"Processing rows {start_line or 1} to {end_line or total_rows} "
+                  f"(indices {start_idx} to {end_idx}, {len(df)} rows)")
+        else:
+            print(f"Processing all {total_rows} rows")
+        
+        # Process each row
+        results_summary = {}
+        
+        for idx, row in df.iterrows():
+            # Calculate actual row number in original Excel (1-indexed)
+            original_row_num = idx + 1 if start_line is None else start_idx + (idx - df.index[0]) + 1
+            
+            input_char = str(row['Input Character']).strip()
+            similar_chars_str = row['Top 20 Similar Characters']
+            
+            print(f"\n{'='*70}")
+            print(f"Processing Row {original_row_num} (DataFrame index {idx}): "
+                  f"Input Character = '{input_char}'")
+            print(f"{'='*70}")
+            
+            # Parse similar characters
+            similar_chars = self._parse_similar_characters(similar_chars_str)
+            print(f"Found {len(similar_chars)} similar characters")
+            
+            # Check font support for all characters
+            all_chars = [input_char] + similar_chars if generate_input_char else similar_chars
+            font_mapping = self.font_manager.find_fonts_for_characters(all_chars)
+            
+            # Report font support
+            unsupported = [c for c, f in font_mapping.items() if f is None]
+            if unsupported:
+                print(f"  Characters without font support ({len(unsupported)}): "
+                      f"{', '.join(unsupported[:5])}" + 
+                      ("..." if len(unsupported) > 5 else ""))
+            
+            # Create folder for this input character
+            safe_char_name = self._sanitize_filename(input_char)
+            char_output_dir = Path(base_output_dir) / f"row_{original_row_num:04d}_{safe_char_name}"
+            char_output_dir.mkdir(exist_ok=True)
+            
+            # Save character information
+            self._save_character_info(char_output_dir, input_char, similar_chars, 
+                                    font_mapping, style_image_path, original_row_num)
+            
+            # Generate characters
+            generated_chars = self._generate_characters_for_row(
+                char_output_dir,
+                input_char,
+                similar_chars,
+                style_image_path,
+                generate_input_char,
+                font_mapping,
+                original_row_num
+            )
+            
+            # Update summary
+            results_summary[input_char] = {
+                'output_dir': str(char_output_dir),
+                'excel_row': original_row_num,
+                'generated_count': len(generated_chars),
+                'similar_characters': similar_chars,
+                'generated_chars': list(generated_chars.keys()),
+                'font_mapping': {k: v for k, v in font_mapping.items() if k in generated_chars}
+            }
+        
+        # Save final summaries
+        self._save_final_summaries(base_output_dir, excel_path, results_summary, 
+                                 start_line, end_line)
+        
+        return results_summary
+    
+    def _parse_similar_characters(self, similar_chars_str) -> List[str]:
+        """Parse similar characters string from Excel"""
+        try:
+            if pd.isna(similar_chars_str):
+                return []
+            
+            if isinstance(similar_chars_str, str):
+                if similar_chars_str.startswith('['):
+                    # Parse as Python list
+                    return ast.literal_eval(similar_chars_str)[:20]
+                else:
+                    # Parse as comma-separated or other format
+                    chars = str(similar_chars_str).strip("[]").replace("'", "").split(',')
+                    return [c.strip() for c in chars if c.strip()][:20]
+            else:
+                return []
+                
+        except Exception as e:
+            print(f"  Warning: Error parsing similar characters: {e}")
+            return []
+    
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize string to be safe for filenames"""
+        # Keep Unicode characters but remove invalid path characters
+        invalid_chars = r'<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+        
+        # Also remove control characters
+        filename = ''.join(c for c in filename if ord(c) >= 32)
+        
+        # Limit length
+        if len(filename) > 50:
+            filename = filename[:50]
+        
+        return filename
+    
+    def _save_character_info(self, output_dir: Path, input_char: str, 
+                           similar_chars: List[str], font_mapping: Dict, 
+                           style_image_path: str, excel_row: int):
+        """Save character information to file"""
+        info_path = output_dir / "character_info.json"
+        info = {
+            'input_character': input_char,
+            'excel_row_number': excel_row,
+            'similar_characters': similar_chars,
+            'style_image': style_image_path,
+            'font_mapping': font_mapping,
+            'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'total_characters': len(similar_chars) + 1
+        }
+        
+        with open(info_path, 'w', encoding='utf-8') as f:
+            json.dump(info, f, indent=2, ensure_ascii=False)
+    
+    def _generate_characters_for_row(self, output_dir: Path, input_char: str,
+                                   similar_chars: List[str], style_image_path: str,
+                                   generate_input_char: bool, font_mapping: Dict,
+                                   excel_row: int) -> Dict:
+        """Generate all characters for a single row"""
+        generated_chars = {}
+        
+        # Characters to generate
+        chars_to_generate = []
+        if generate_input_char:
+            chars_to_generate.append(('input', input_char))
+        
+        for char in similar_chars:
+            chars_to_generate.append(('similar', char))
+        
+        # Generate each character
+        for char_type, char in chars_to_generate:
+            print(f"  [{len(generated_chars)+1}/{len(chars_to_generate)}] "
+                  f"Generating '{char}'...", end='')
+            
+            # Check font support
+            if font_mapping.get(char) is None:
+                print(" ✗ (no font support)")
+                continue
+            
+            # Generate character
+            generated_image, content_pil = self.generate_character(char, style_image_path)
+            
+            if generated_image is not None:
+                # Save the generated character
+                save_success = self._save_generated_character(
+                    output_dir, char_type, char, generated_image, content_pil, style_image_path
+                )
+                
+                if save_success:
+                    generated_chars[char] = {
+                        'type': char_type,
+                        'font_used': font_mapping[char]
+                    }
+                    print(" ✓")
+                else:
+                    print(" ✗ (save failed)")
+            else:
+                print(" ✗ (generation failed)")
+        
+        return generated_chars
+    
+    def _save_generated_character(self, output_dir: Path, char_type: str, char: str,
+                                generated_image: torch.Tensor, content_pil: Optional[Image.Image],
+                                style_image_path: str) -> bool:
+        """Save generated character to appropriate location"""
+        try:
+            # Create directory structure
+            if char_type == 'input':
+                char_dir = output_dir / "input_character"
+            else:
+                char_dir = output_dir / "similar_characters" / self._sanitize_filename(char)
+            
+            char_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save single image
+            save_single_image(save_dir=str(char_dir), image=generated_image)
+            
+            # Save with content and style if available
+            if self.args.character_input and content_pil is not None:
+                save_image_with_content_style(
+                    save_dir=str(char_dir),
+                    image=generated_image,
+                    content_image_pil=content_pil,
+                    content_image_path=None,
+                    style_image_path=style_image_path,
+                    resolution=self.args.resolution
+                )
+            
+            return True
+            
+        except Exception as e:
+            print(f"    Error saving character '{char}': {e}")
+            return False
+    
+    def _save_final_summaries(self, base_output_dir: str, excel_path: str, 
+                            results_summary: Dict, start_line: Optional[int], 
+                            end_line: Optional[int]):
+        """Save final summary files"""
+        base_path = Path(base_output_dir)
+        
+        # Global summary
+        global_summary = {
+            'processing_completed': time.strftime('%Y-%m-%d %H:%M:%S'),
+            'excel_file': excel_path,
+            'output_directory': base_output_dir,
+            'line_range': {
+                'start_line': start_line,
+                'end_line': end_line,
+                'processed_rows': len(results_summary)
+            },
+            'processing_statistics': self.stats,
+            'detailed_results': results_summary
+        }
+        
+        # Save as JSON
+        with open(base_path / "global_summary.json", 'w', encoding='utf-8') as f:
+            json.dump(global_summary, f, indent=2, ensure_ascii=False)
+        
+        # Also save as human-readable text
+        with open(base_path / "global_summary.txt", 'w', encoding='utf-8') as f:
+            f.write(f"FontDiffuser Batch Processing Summary\n")
+            f.write(f"=" * 60 + "\n\n")
+            
+            f.write(f"Processing Completed: {global_summary['processing_completed']}\n")
+            f.write(f"Excel File: {excel_path}\n")
+            f.write(f"Output Directory: {base_output_dir}\n")
+            
+            if start_line or end_line:
+                f.write(f"Line Range: {start_line or 'start'} to {end_line or 'end'}\n")
+            f.write(f"Total Rows Processed: {len(results_summary)}\n\n")
+            
+            f.write(f"Processing Statistics:\n")
+            f.write(f"  Characters Processed: {self.stats['characters_processed']}\n")
+            f.write(f"  Characters Skipped (no font): {self.stats['characters_skipped_no_font']}\n")
+            f.write(f"  Characters Skipped (render failed): {self.stats['characters_skipped_render_failed']}\n")
+            f.write(f"  Generation Errors: {self.stats['generation_errors']}\n")
+            f.write(f"  Edge Cases Fixed: {self.stats['edge_cases_fixed']}\n\n")
+            
+            f.write(f"Font Usage Statistics:\n")
+            for font_name, count in self.stats['fonts_used'].items():
+                f.write(f"  {font_name}: {count} characters\n")
+            f.write("\n")
+            
+            f.write(f"Results by Input Character:\n")
+            for input_char, info in results_summary.items():
+                f.write(f"\n  {input_char} (Row {info['excel_row']}):\n")
+                f.write(f"    Output: {info['output_dir']}\n")
+                f.write(f"    Generated: {info['generated_count']} characters\n")
+        
+        print(f"\n{'='*70}")
+        print(f"PROCESSING COMPLETE")
+        print(f"{'='*70}")
+        print(f"Statistics:")
+        print(f"  • Characters processed: {self.stats['characters_processed']}")
+        print(f"  • Characters skipped (no font): {self.stats['characters_skipped_no_font']}")
+        print(f"  • Characters skipped (render failed): {self.stats['characters_skipped_render_failed']}")
+        print(f"  • Generation errors: {self.stats['generation_errors']}")
+        print(f"  • Edge cases fixed: {self.stats['edge_cases_fixed']}")
+        print(f"\nFont usage:")
+        for font_name, count in sorted(self.stats['fonts_used'].items(), key=lambda x: x[1], reverse=True):
+            print(f"  • {font_name}: {count}")
+        print(f"\nOutput saved to: {base_output_dir}")
+        print(f"Global summary: {base_path / 'global_summary.json'}")
+
 
 def parse_excel_batch_args():
-    """Parse arguments for batch processing with multi-font support"""
+    """Parse arguments for batch processing with line range support"""
     from configs.fontdiffuser import get_parser
     
     parser = get_parser()
@@ -279,11 +633,18 @@ def parse_excel_batch_args():
                        help="Base directory for all outputs")
     parser.add_argument("--skip_input_char", action="store_true",
                        help="Skip generating the input character")
+    
+    # NEW: Line range arguments
+    parser.add_argument("--start_line", type=int, default=None,
+                       help="Starting line number in Excel (1-indexed, inclusive)")
+    parser.add_argument("--end_line", type=int, default=None,
+                       help="Ending line number in Excel (1-indexed, inclusive)")
     parser.add_argument("--max_rows", type=int, default=None,
-                       help="Maximum number of rows to process")
+                       help="Maximum number of rows to process (alternative to end_line)")
+    
+    # Debug argument
     parser.add_argument("--debug", action="store_true",
-                   help="Save debug images and additional information")
-
+                       help="Save debug images and additional information")
     
     args = parser.parse_args()
     
@@ -321,6 +682,27 @@ def parse_excel_batch_args():
             raise ValueError("No font files specified or found. Use --ttf_path or --font_dir")
     
     args.font_paths = font_paths
+    
+    # Validate line range arguments
+    if args.start_line is not None and args.start_line < 1:
+        print(f"Warning: start_line must be >= 1, got {args.start_line}")
+        args.start_line = 1
+    
+    if args.end_line is not None and args.end_line < 1:
+        print(f"Warning: end_line must be >= 1, got {args.end_line}")
+        args.end_line = None
+    
+    if args.start_line is not None and args.end_line is not None:
+        if args.start_line > args.end_line:
+            print(f"Warning: start_line ({args.start_line}) > end_line ({args.end_line}), swapping")
+            args.start_line, args.end_line = args.end_line, args.start_line
+    
+    # Handle max_rows if specified (alternative to end_line)
+    if args.max_rows is not None:
+        if args.end_line is None and args.start_line is not None:
+            args.end_line = args.start_line + args.max_rows - 1
+        elif args.end_line is None:
+            args.end_line = args.max_rows
     
     return args
 
@@ -364,11 +746,13 @@ def load_fontdiffuser_pipeline(args):
 
 
 def main_batch_processing():
-    """Main function for batch processing Excel file with multi-font support"""
+    """Main function for batch processing Excel file with line range support"""
     args = parse_excel_batch_args()
     
     print(f"\n{'='*70}")
     print(f"FONTDIFFUSER BATCH PROCESSING")
+    if args.start_line or args.end_line:
+        print(f"Line Range: {args.start_line or 'start'} to {args.end_line or 'end'}")
     print(f"{'='*70}")
     
     # Create output directory
@@ -385,7 +769,8 @@ def main_batch_processing():
     print(f"\nLoading fonts...")
     font_manager = FontManager(
         font_paths=args.font_paths,
-        font_size=128  # You can make this configurable if needed
+        font_size=256,
+        canvas_size=256
     )
     
     # Load pipeline once
@@ -402,7 +787,8 @@ def main_batch_processing():
         base_output_dir=str(output_dir),
         style_image_path=args.style_image_path,
         generate_input_char=not args.skip_input_char,
-        max_rows=args.max_rows
+        start_line=args.start_line,
+        end_line=args.end_line
     )
     
     return results
@@ -424,8 +810,11 @@ python sample_excel.py \
     --style_image_path "./style/A.png" \
     --ckpt_dir "./checkpoints" \
     --ttf_path "./fonts/KaiXinSongA.ttf" \
-    --output_base_dir "./output" \
-    --debug  # Enable debug mode
+    --output_base_dir "./output_30_40" \
+    --start_line 30 \
+    --end_line 40 \
+    --skip_input_char \
+    --debug
 """
 
 """output/
