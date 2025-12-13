@@ -1,53 +1,20 @@
 """
-FontDiffuser Batch Processing with Line Range Specification
-Adds --start_line and --end_line arguments for selective processing
+Robust Font Manager for FontDiffuser Batch Processing
 """
 
 import os
-import sys
-import json
-import time
-import warnings
-import copy
 from pathlib import Path
-from typing import List, Dict, Tuple, Optional, Set
+from typing import List, Dict, Optional, Set
 from collections import defaultdict
 from functools import lru_cache
 
-import pandas as pd
-import ast
-import torch
 import numpy as np
-import cv2
 from PIL import Image
 import pygame
 import pygame.freetype
 from fontTools.ttLib import TTFont
-import torchvision.transforms as transforms
-from accelerate.utils import set_seed
+import cv2
 
-# Suppress warnings
-warnings.filterwarnings('ignore')
-
-# Import FontDiffuser components
-try:
-    from src import (
-        FontDiffuserDPMPipeline,
-        FontDiffuserModelDPM,
-        build_ddpm_scheduler,
-        build_unet,
-        build_content_encoder,
-        build_style_encoder
-    )
-    from utils import (
-        save_args_to_yaml,
-        save_single_image,
-        save_image_with_content_style
-    )
-except ImportError as e:
-    print(f"Error importing FontDiffuser modules: {e}")
-    print("Please ensure the required modules are in your Python path")
-    sys.exit(1)
 
 def ttf2im_robust(font, char, canvas_size=256):
     """
@@ -137,7 +104,8 @@ def ttf2im_robust(font, char, canvas_size=256):
     except Exception as e:
         print(f"Error processing character '{char}': {e}")
         return None
-    
+
+
 class FontRenderer:
     """
     Robust font renderer with fixed ttf2im and additional safety checks
@@ -344,6 +312,27 @@ class FontManager:
         
         return None
     
+    def find_fonts_for_characters(self, characters: List[str]) -> Dict[str, Optional[str]]:
+        """
+        Find which font supports each character in a list
+        
+        Args:
+            characters: List of characters to check
+            
+        Returns:
+            Dictionary mapping character to font name (or None if no font supports it)
+        """
+        font_mapping = {}
+        
+        for char in characters:
+            font_info = self.get_supporting_font(char)
+            if font_info:
+                font_mapping[char] = font_info['name']
+            else:
+                font_mapping[char] = None
+        
+        return font_mapping
+    
     def can_render_character(self, char: str) -> bool:
         """Check if any loaded font can render the character"""
         return self.get_supporting_font(char) is not None
@@ -445,7 +434,7 @@ class FontManager:
         test_sets = {
             'basic_latin': "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
             'common_chinese': "的一是不了人我在有他这为之大来以个中上们",
-            'punctuation': "，。？！；：""''（）【】《》"
+            'punctuation': "，。？！；：''（）【】《》"
         }
         
         for font_info in self.available_fonts:
