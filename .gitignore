@@ -5,6 +5,8 @@ run_sh/
 ckpt/
 ttf/
 data/
+*.zip
+content/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
